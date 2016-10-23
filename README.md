@@ -7,10 +7,12 @@
     ```python
     douban = DoubanMovie('xx.json')
     ```
+
 * 获取电影信息， `keyType` 一般为 `id` 或 `tite`，返回一个(movieID, movieInfo)的元组：
     ```python
     douban.GetMovieInfo(key, keyType)
     ```
+
 * 获取豆瓣电影top250，返回一个列表，包括250个id：
     ```python
     douban.GetTop250()
