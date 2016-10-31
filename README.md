@@ -6,6 +6,7 @@
 # LocalFilmInfo.py
 * 归档本地电影（使用DoubanMovie.py）和豆瓣电影top250并将结果输出到excel文件
 * 依赖xlsxwriter
+* 依赖ffprobe.exe，需将之放入环境变量或同目录下
 * 读取与之同名的ini配置文件
 
 # LocalFilmInfo.ini
