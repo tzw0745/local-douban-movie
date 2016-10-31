@@ -1,4 +1,5 @@
 # 项目说明
+![](http://ofpb4e3i2.bkt.clouddn.com/16-10-31/26400320.jpg)
 * 使用豆瓣的[电影api](https://developers.douban.com/wiki/?title=movie_v2)获取电影信息并缓存在本地，缓存有效期为30天。
 
 # DoubanMovie.py
