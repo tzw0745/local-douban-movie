@@ -16,14 +16,16 @@ logging.basicConfig(format=f)
 class DoubanMovie:
     """use douban movie api, get movie info, search movie"""
 
-    def __init__(self, file_name):
+    def __init__(self, file_name, proxy=None):
         self.logger = logging.getLogger('tipper')
         self.logger.setLevel(logging.DEBUG)
         self.logger.debug("init begin")
 
         self.api_url = 'http://movie.douban.com/api/v2'
+        self.session = requests.session()
+        self.proxies = {} if not proxy else {'http': proxy, 'https': proxy}
 
-        # 缓存文件名
+        # 缓存文件相关
         self.file_name = file_name
         self.coding = 'utf-8'
         self.changed = False
@@ -32,7 +34,6 @@ class DoubanMovie:
         # 设置两次调用豆瓣api之间的间隔
         self.gap = 10
         self.last_use_api = 0
-        self.session = requests.session()
 
         # 读取缓存
         try:
