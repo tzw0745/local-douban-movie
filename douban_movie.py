@@ -32,7 +32,7 @@ class DoubanMovie:
         # 设置缓存有效期
         self.failure_time = 30 * 24 * 3600
         # 设置两次调用豆瓣api之间的间隔
-        self.gap = 10
+        self.gap = 2
         self.last_use_api = 0
 
         # 读取缓存
