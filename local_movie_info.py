@@ -227,7 +227,7 @@ def main(db):
         i += 1
         row = [info['rating'], info['rater_num'], info['year'], info['title0'],
                info['title1'], info['director'], info['country']]
-        worksheet.write_row(i, 0, row)
+        worksheet.write_row(i, 0, row, center)
         worksheet.write_url(i, 7, info['url'], link_format, '链接')
     # 首行冻结
     worksheet.freeze_panes(1, 0)

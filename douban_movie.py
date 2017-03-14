@@ -134,7 +134,7 @@ class DoubanMovie:
         :param key_type: 查询类型，如'id', 'title'等
         :return: (movieID, movie_db)
         """
-        self.logger.debug("search movie {}{} on douban".
+        self.logger.debug("search movie {} {} on douban".
                           format(key_type, keyword))
         key_type = key_type.lower()
         if key_type == 'id':
