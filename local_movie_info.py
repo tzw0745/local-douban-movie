@@ -1,5 +1,6 @@
 # coding:utf-8
 import os
+import copy
 import json
 import subprocess
 import configparser
@@ -9,21 +10,21 @@ import xlsxwriter
 from douban_movie import DoubanMovie
 
 
-def get_all_file(dir_list_bak):
+def get_all_file(dir_list):
     """
     递归获取父文件夹下的所有的文件
-    :param dir_list_bak: 父文件夹列表
+    :param dir_list: 父文件夹列表
     :return: 文件集合
     """
-    dir_list = list(dir_list_bak)
+    work_dir_list = copy.copy(dir_list)
     file_list = []
     i = 0
     # dir_list是递增的，所以不能用for in
-    while i < len(dir_list):
-        for x in os.listdir(dir_list[i]):
-            path = '{0}/{1}'.format(dir_list[i], x)
+    while i < len(work_dir_list):
+        for x in os.listdir(work_dir_list[i]):
+            path = '{0}/{1}'.format(work_dir_list[i], x)
             if os.path.isdir(path):
-                dir_list.append(path)
+                work_dir_list.append(path)
             elif os.path.isfile(path):
                 file_list.append(path)
         i += 1
@@ -39,26 +40,10 @@ def filter_file(file_list, ext_names):
     """
     result = []
     for ext in ext_names:
-        result.extend(filter(lambda x: x.lower().endswith(
-            ext.lower()), file_list))
+        result.extend(
+            filter(lambda x: x.lower().endswith(ext.lower()), file_list)
+        )
     return result
-
-
-def parse_director_name(director_name):
-    """
-    中文+英文格式的导演姓名转换成英文，否则不转换
-    :param director_name: 导演姓名
-    :return: 转换后的姓名
-    """
-    import re
-    for i, ch in enumerate(director_name):
-        if re.match(r'[a-zA-Z]+', ch):
-            start = i
-            break
-    else:
-        start = 0
-
-    return director_name[start:]
 
 
 def video_format(video_path):
@@ -90,77 +75,71 @@ def video_format(video_path):
             'bit_rate': round(bit_rate, 1)}
 
 
-def main(db):
+def main():
     ini_name, _ = os.path.splitext(os.path.basename(__file__))
-    cf = configparser.ConfigParser()
-    cf.read('{}.ini'.format(ini_name))
+    cfg = configparser.ConfigParser()
+    cfg.read('{}.ini'.format(ini_name))
 
-    dir_list = cf.get('main', 'path').split(';')
+    dir_list = cfg.get('main', 'path').split(';')
     dir_list = [d for d in dir_list if d and os.path.exists(d)]
     file_list = get_all_file(dir_list)
 
-    out_file = cf.get('main', 'out')
+    out_file = cfg.get('main', 'out')
+    user = cfg.get('main', 'username')
+    pwd = cfg.get('main', 'password')
 
     ext_names = ['.mkv', '.rmvb', '.rm', '.wmv', '.avi', '.mpg', '.mpeg']
     movie_list = filter_file(file_list, ext_names)
 
-    print('开始统计本地电影信息')
     local_movie = []
-    for movie_path in movie_list:
-        # 获取文件大小(G)
-        size = round(os.path.getsize(movie_path) / (1024 * 1024 * 1024), 1)
-        format_info = video_format(movie_path)
-
-        # 获取电影名称
-        movie_name = movie_path.split('/')[-1]
-        movie_name = movie_name.split('.')[0]
-        if '(' in movie_name:
-            movie_name = movie_name.split('(')[0]
-        print(movie_name)
-
-        # 通过电影名称查找豆瓣信息
-        _, db_info = db.get_movie_info(movie_name, 'title')
-        if not db_info:
-            print('未找到 "{0}" 的电影信息\n'.format(movie_name))
-            continue
-        if db_info['attrs']['director']:
-            director = db_info['attrs']['director'][0]
-        else:
-            director = ''
-        director = parse_director_name(director)
-
-        local_movie.append({'size': size,
-                            'name': movie_name,
-                            'rating': float(db_info['rating']['average']),
-                            'director': director,
-                            'width': format_info['width'],
-                            'height': format_info['height'],
-                            'duration': format_info['duration'],
-                            'bit_rate': format_info['bit_rate'],
-                            'path': movie_path,
-                            'url': db_info['alt']})
-    local_movie.sort(key=lambda x: x['bit_rate'])
-
-    print('开始统计豆瓣电影Top250')
     top250 = []
-    for i, movie_id in enumerate(db.get_top_250()):
-        _, db_info = douban.get_movie_info(movie_id, 'id')
-        if db_info:
-            if db_info['attrs']['director']:
-                director = db_info['attrs']['director'][0]
+    with DoubanMovie('douban_movie.db', user, pwd) as db:
+        print('----开始统计本地电影信息----')
+        for movie_path in movie_list:
+            # 获取文件大小(G)
+            size = round(os.path.getsize(movie_path) / 1073741824, 1)
+            format_info = video_format(movie_path)
+
+            # 获取电影名称
+            movie_name = movie_path.split('/')[-1]
+            movie_name = movie_name.split('.')[0]
+            movie_name = movie_name.split('[')[0]
+            if '(' in movie_name:
+                movie_name = movie_name.split('(')[0]
+            print(movie_name)
+
+            # 通过电影名称查找豆瓣信息
+            movie_info = db.get_movie_info(title=movie_name)
+            if not movie_info:
+                raise KeyError('未找到 "{0}" 的电影信息\n'.format(movie_name))
+
+            local_movie.append({'size': size,
+                                'name': movie_name,
+                                'rating': movie_info['rating'],
+                                'director': movie_info['director'],
+                                'width': format_info['width'],
+                                'height': format_info['height'],
+                                'duration': format_info['duration'],
+                                'bit_rate': format_info['bit_rate'],
+                                'path': movie_path,
+                                'url': movie_info['url']})
+        local_movie.sort(key=lambda x: x['bit_rate'])
+
+        print('----开始统计豆瓣电影Top250----')
+        for i, movie_id in enumerate(db.get_top250()):
+            info = db.get_movie_info(movie_id=movie_id)
+            if info:
+                top250.append({'rater_num': info['raters'],
+                               'rating': float(info['rating']),
+                               'director': info['director'],
+                               'year': int(info['year']),
+                               'title0': info['title'],
+                               'title1': info['origin'],
+                               'country': info['regions'],
+                               'url': info['url']})
+                print('Top{:0>3}'.format(i), info['title'])
             else:
-                director = ''
-            top250.append({'rater_num': db_info['rating']['numRaters'],
-                           'rating': float(db_info['rating']['average']),
-                           'director': parse_director_name(director),
-                           'year': int(db_info['attrs']['year'][0]),
-                           'title0': db_info['title'][0],
-                           'title1': db_info['title'][1],
-                           'country': ' '.join(db_info['attrs']['country']),
-                           'url': db_info['alt']})
-            print(db_info['title'][0])
-        else:
-            print('Top{0}查找失败!'.format(i))
+                raise KeyError('Top{}({})查找失败!'.format(i, movie_id))
 
     print('写入{}中...'.format(out_file))
     # 创建工作簿
@@ -197,7 +176,7 @@ def main(db):
         worksheet.write(i, 0, info['size'], center)
         worksheet.write_url(i, 1, info['url'], link_format, info['name'])
         temp = [info['rating'], info['director'], info['width'],
-                info['width'], info['duration'], info['bit_rate']]
+                info['height'], info['duration'], info['bit_rate']]
         worksheet.write_row(i, 2, temp, center)
         worksheet.write_url(i, 8, info['path'], link_format, '播放')
     # 首行冻结
@@ -217,8 +196,8 @@ def main(db):
     worksheet.set_column('D:E', 30)
     worksheet.set_column('F:G', 20)
     # 写入表头
-    head = ['评分', '评分人数', '年代', '原名',
-            '译名', '导演', '国家/地区', '链接']
+    head = ['评分', '评分人数', '年代', '中文名',
+            '原名', '导演', '国家/地区', '链接']
     worksheet.write_row('A1', head, center)
     # 自动筛选
     worksheet.autofilter(0, 0, 0, len(head) - 1)
@@ -237,10 +216,14 @@ def main(db):
 
 
 if __name__ == '__main__':
-    douban = DoubanMovie('DoubanMovie.json')
+    split_line = '-' * 80
     try:
-        main(db=douban)
-    except:
-        raise
+        print(split_line)
+        main()
+        print('\nall done')
+    except Exception as e:
+        import traceback
+
+        print(''.join([str(e), traceback.format_exc()]))
     finally:
-        douban.close()
+        print(split_line)
