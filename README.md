@@ -4,6 +4,7 @@
 * 登陆豆瓣成功后将cookie保存在本地
 * 列出豆瓣电影top250
 * 以上信息输出到Excel文件
+* Python3.5 + Win10 x64测试通过
 
 # local_movie_info.py
 * 归档本地电影并统计豆瓣电影top250（import douban_movie.py），将信息输出到excel文
@@ -42,5 +43,5 @@
 * 自动清除超过15天的电影数据(可调)
 
 # 依赖
-* ffprobe.exe，需将其放入环境变量或工作目录下
+* ffprobe的可执行程序，需将其放入环境变量或工作目录下
 * lxml+requests+xlsxwriter
