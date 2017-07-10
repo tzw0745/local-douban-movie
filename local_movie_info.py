@@ -5,6 +5,7 @@ import json
 import subprocess
 import configparser
 
+import re
 import xlsxwriter
 
 from douban_movie import DoubanMovie
@@ -102,10 +103,11 @@ def main():
 
             # 获取电影名称
             movie_name = movie_path.split('/')[-1]
-            movie_name = movie_name.split('.')[0]
-            movie_name = movie_name.split('[')[0]
-            if '(' in movie_name:
-                movie_name = movie_name.split('(')[0]
+            movie_name = movie_name[:movie_name.rfind('.')]
+            if re.match(r'^[a-zA-Z0-9]+$', movie_name):
+                continue
+            movie_name = movie_name.split('.')[-1]
+            movie_name = re.split(r'[\[\(]+', movie_name)[0]
             print(movie_name)
 
             # 通过电影名称查找豆瓣信息
