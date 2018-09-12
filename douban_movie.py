@@ -3,15 +3,17 @@
 """
 Created by tzw0745 on 2017/3/22.
 """
-import re
-import os
-import time
 import json
+import math
+import os
+import re
 import sqlite3
-from datetime import datetime
+import time
+import datetime
+from urllib import parse
 
-import requests
 import lxml.html
+import requests
 
 
 class LoginError(Exception):
@@ -19,76 +21,83 @@ class LoginError(Exception):
 
 
 class DoubanMovie:
-    def __init__(self, db_file, username, pwd, cookie_dir='cookie'):
+    """
+    豆瓣电影类，获取并缓存来自豆瓣电影信息。获取方式为HTML解析，缓存方式为sqlite
+    """
+    host_index = 'https://www.douban.com/'
+    host_movie = 'https://movie.douban.com/'
+    host_api = 'https://api.douban.com/'
+    __session = None
+    __last_request = 0
+    interval = 2  # HTTP请求最小间隔，单位为秒
+
+    db_conn = None
+    db_table = 'DoubanMovie'
+    expires = 15 * 24 * 3600  # 缓存失效期，单位为秒
+
+    def __init__(self, db_file: str, username: str, pwd: str, cookies_dir='cookies'):
         """
-        初始化类。
+        初始化类
         :param db_file: 数据库文件名
-        :param username: 用户名
-        :param pwd: 密码
-        :param cookie_dir: cookie保存的文件夹
+        :param username: 豆瓣用户名
+        :param pwd: 豆瓣密码
+        :param cookies_dir: cookies文件夹
         """
-        # 判断参数是否有效&初始化参数
-        if not re.match(r'^\w+@\w+\.\w+$', username) and \
-                not re.match(r'^[0-9]{11}$', username):
-            raise KeyError('用户名必须是邮箱或手机号')
+        if not all(isinstance(_, str)
+                   for _ in [db_file, username, pwd, cookies_dir]):
+            raise TypeError('All params must be str')
 
-        self.failed_days = 15
-        self.server = 'https://movie.douban.com/'
-        self.s = requests.session()
+        self.__session = requests.session()
+        # 初始化数据库连接
+        _sql = ("CREATE TABLE {}"
+                "(id       INT  PRIMARY KEY,\n"
+                "url      TEXT NOT NULL,\n"
+                "title    TEXT NOT NULL,\n"
+                "origin   TEXT,\n"
+                "year     INT  NOT NULL,\n"
+                "rating   FLOAT NOT NULL,\n"
+                "raters   INT NOT NULL,\n"
+                "director TEXT NOT NULL,\n"
+                "tags     TEXT NOT NULL,\n"
+                "regions  TEXT NOT NULL,\n"
+                "iMDb     TEXT NOT NULL,\n"
+                "time     DATE NOT NULL)").format(self.db_table)
+        self.conn = connect_db(db_file, self.db_table, _sql)
 
-        # 开启数据库
-        self.table_name = 'DoubanMovie'
-        temp = '''CREATE TABLE {}
-                                          (id       INT  PRIMARY KEY,
-                                           url      TEXT NOT NULL,
-                                           title    TEXT NOT NULL,
-                                           origin   TEXT,
-                                           year     INT  NOT NULL,
-                                           rating   FLOAT NOT NULL,
-                                           raters   INT NOT NULL,
-                                           director TEXT NOT NULL,
-                                           tags     TEXT NOT NULL,
-                                           regions  TEXT NOT NULL,
-                                           iMDb     TEXT NOT NULL,
-                                           time     DATE NOT NULL)'''.format(self.table_name)
-        self.conn = connect_db(db_file, self.table_name, temp)
-
-        # 从本地载入cookie并判断是否有效
-        if not os.path.exists(cookie_dir):
-            os.mkdir(cookie_dir)
-        cookie_path = '{}/{}.json'.format(cookie_dir, username)
-        if os.path.exists(cookie_path):
-            with open(cookie_path, 'r') as f:
-                self.s.cookies.update(json.load(f))
-            if not self.is_online():
-                self.s.cookies.clear()
-            else:
-                return
+        # 载入本地cookies
+        os.mkdir(cookies_dir) if not os.path.exists(cookies_dir) else None
+        _cookies = os.path.join(cookies_dir, 'cookies_' + username + '.json')
+        if os.path.exists(_cookies):
+            with open(_cookies, 'r', encoding='utf-8') as f:
+                self.__session.cookies.update(json.load(f))
+            if self.is_online():
+                return  # Cookies有效
+            self.__session.cookies.clear()
 
         # 登陆准备，包括获取验证码
-        url = '{}login'.format(self.server.replace('movie', 'www'))
+        url = parse.urljoin(self.host_index, 'login')
         post_data = {'source': 'index_nav',
-                     'redir': self.server,
+                     'redir': self.host_movie,
                      'form_email': username,
                      'form_password': pwd,
                      'remember': 'on',
                      'login': '登录'}
-        r = self.s.get(url)
-        if r.text == 'Please try later.' and r.status_code == 403:
-            raise LoginError('your IP has been blocked')
-        captcha = self.__get_captcha(r.text)
-        if captcha:
+        r = self._request(url)
+        if 'Please try later.' in r.text and r.status_code == 403:
+            raise LoginError('IP has been blocked')
+        captcha_info = self.__get_captcha(r.text)
+        if captcha_info:
             captcha_file = 'captcha.jpg'
-            post_data['captcha-id'] = captcha['id']
+            post_data['captcha-id'] = captcha_info['id']
             with open(captcha_file, 'wb') as f:
-                f.write(self.s.get(captcha['url']).content)
+                f.write(self._request(captcha_info['url']).content)
             os.system(captcha_file)
             print('please input captcha code: ', end='')
             post_data['captcha-solution'] = input()
             os.remove(captcha_file)
 
         # 登陆并判断是否成功
-        r = self.s.post(url, data=post_data)
+        r = self._request(url, data=post_data)
         if r.status_code != 200:
             raise LoginError('登陆失败 {}'.format(r.status_code))
         tree = lxml.html.fromstring(r.text)
@@ -98,14 +107,39 @@ class DoubanMovie:
             raise LoginError('验证码错误')
 
         # 保存本地cookie
-        with open(cookie_path, 'w') as f:
-            json.dump(self.s.cookies.get_dict(), f, indent=2)
+        with open(_cookies, 'w') as f:
+            json.dump(self.__session.cookies.get_dict(), f, indent=2)
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
+
+    def _request(self, url: str, retry=3, head=None, data=None):
+        """
+        隐藏session，控制HTTP请求频率
+        :param url: 请求链接
+        :param retry: 重试次数
+        :param head: HTTP请求头
+        :param data: post数据，存在时发送POST请求
+        :return: request.Response对象
+        """
+        # print('[log]request to ', url)
+        if time.time() - self.__last_request < self.interval:
+            time.sleep(math.ceil(time.time() - self.__last_request))
+        func = self.__session.post if data else self.__session.get
+        for _ in range(retry):
+            try:
+                r = func(url, headers=head, data=data)
+                break
+            except requests.RequestException:
+                continue
+        else:
+            r = func(url, headers=head, data=data)
+        self.__last_request = time.time()
+
+        return r
 
     def __get_captcha(self, html):
         """
@@ -117,8 +151,8 @@ class DoubanMovie:
 
         for img in tree.cssselect('input[name=captcha\-id]'):
             captcha_id = img.get('value')
-            url = '{}misc/captcha?id={}'.format(self.server, captcha_id)
-            return {'url': url.replace('movie.', 'www.'),
+            url = 'misc/captcha?id={}'.format(captcha_id)
+            return {'url': parse.urljoin(self.host_index, url),
                     'id': captcha_id}
 
     def is_online(self):
@@ -126,110 +160,92 @@ class DoubanMovie:
         判断当前是否在线
         :return: 无
         """
-        url = '{}settings/'.format(self.server)
-        r = self.s.get(url)
+        url = parse.urljoin(self.host_index, 'settings')
+        r = self._request(url)
         for title in re.findall(r'<title>(.*)</title>', r.text):
             if '登录豆瓣' == title:
                 return False
         else:
             return True
 
-    def get_movie_info(self, title=None, movie_id=None, retry=3):
+    def get_movie_info(self, movie_id=None, title=None):
         """
-        获取豆瓣电影信息
+        通过电影名称或电影id获取豆瓣电影信息。两个条件中最少要有一个，movie_id优先级更高
+        :param movie_id: 电影id
         :param title: 电影名称
-        :param movie_id: 电影豆瓣id
-        :param retry: 重试次数
         :return: 电影信息字典
         """
-        if title == movie_id is None:
-            raise KeyError('电影名称、电影id必须要有一个')
+        if not any([title, movie_id]):
+            raise TypeError('Param "title" and "movie_id" cant all empty')
+        if movie_id and not str(movie_id).isdigit():
+            raise TypeError('Param "movie" must be digit str')
 
-        if title is not None:
-            temp = 'SELECT * FROM {} WHERE title=?'.format(self.table_name)
-            cur = self.conn.execute(temp, (title,))
-            for info in dict_gen(cur):
+        if title:
+            _sql = "SELECT * FROM {} WHERE title=?".format(self.db_table)
+            cursor = self.conn.execute(_sql, (title,))
+            for info in dict_gen(cursor):
                 return self.get_movie_info(movie_id=info['id'])
 
-            url = '{}j/subject_suggest?q={}'.format(self.server, title)
+            url = 'j/subject_suggest?q={}'.format(title)
             head = {'X-Requested-With': 'XMLHttpRequest'}
-            for suggest in self.s.get(url, headers=head).json():
+            for suggest in self._request(url, head=head).json():
                 if suggest['title'] == title:
-                    temp = re.findall(r'subject/(\d+)/', suggest['url'])[0]
-                    return self.get_movie_info(movie_id=temp)
+                    _id = re.findall(r'subject/(\d+)/', suggest['url'])[0]
+                    return self.get_movie_info(movie_id=_id)
             else:
                 return {}  # 未找到数据
-
-        elif movie_id is not None:
-            if not str(movie_id).isdigit():
-                raise KeyError('电影id必须为纯数字')
-
-            temp = 'SELECT * FROM {} WHERE id=?'.format(self.table_name)
-            cur = self.conn.execute(temp, (str(movie_id),))
-            for info in dict_gen(cur):
-                then = datetime.strptime(info['time'], '%Y-%m-%d %X.%f')
-                if (datetime.now() - then).days >= self.failed_days:
+        elif movie_id:
+            _sql = 'SELECT * FROM {} WHERE id=?'.format(self.db_table)
+            cursor = self.conn.execute(_sql, (str(movie_id),))
+            for info in dict_gen(cursor):
+                stamp = datetime.datetime.strptime(info['time'], '%Y-%m-%d %X.%f')
+                if (datetime.datetime.now() - stamp).seconds >= self.expires:
                     break
                 return info
 
-        url = 'https://movie.douban.com/subject/{}/'.format(movie_id)
-        for i in range(retry):
-            try:
-                r = self.s.get(url)
-                break
-            except requests.RequestException:
-                time.sleep(0.5)
-        else:
-            r = self.s.get(url)
-
+        url = parse.urljoin('subject/', str(movie_id))
+        r = self._request(parse.urljoin(self.host_movie, url))
         if r.status_code != 200:
-            return {}  # 获取页面失败
-        r.encoding = 'utf-8'
+            return {}
 
-        tree = lxml.html.fromstring(r.text)
-        temp = tree.cssselect('span[property=v\:itemreviewed]')[0]
+        tree = lxml.html.fromstring(r.content)
+        _ = tree.cssselect('span[property=v\:itemreviewed]')[0]
         try:
-            title, origin = temp.text.strip().split(maxsplit=1)
+            title, origin = _.text.strip().split(maxsplit=1)
         except ValueError:  # 中文电影只有一个标题
-            title, origin = temp.text.strip(), ''
-        temp = tree.cssselect('span.year')[0]
-        year = int(re.findall(r'\d{4}', temp.text)[0])
-        temp = tree.cssselect('strong[property=v\:average]')[0]
-        rating = float(temp.text)
-        temp = tree.cssselect('span[property=v\:votes]')[0]
-        raters = int(temp.text)
-        temp = tree.cssselect('a[rel=v\:directedBy]')[0]
-        director = temp.text
-        temp = tree.cssselect('span[property=v\:genre]')
-        tags = '/'.join(x.text.strip() for x in temp)
-        temp = re.findall(r'制片国家/地区:</span>(.*)<br/>', r.text)[0]
-        regions = '/'.join(str(x).strip() for x in temp.split('/'))
+            title, origin = _.text.strip(), ''
+        _ = tree.cssselect('span.year')[0]
+        year = int(re.findall(r'\d{4}', _.text)[0])
+        _ = tree.cssselect('strong[property=v\:average]')[0]
+        rating = float(_.text)
+        _ = tree.cssselect('span[property=v\:votes]')[0]
+        raters = int(_.text)
+        _ = tree.cssselect('a[rel=v\:directedBy]')[0]
+        director = _.text
+        _ = tree.cssselect('span[property=v\:genre]')
+        tags = '/'.join(x.text.strip() for x in _)
+        _ = re.findall(r'制片国家/地区:</span>(.*)<br/>', r.text)[0]
+        regions = '/'.join(str(x).strip() for x in _.split('/'))
         imdb = re.findall(r'IMDb链接:</span> <a href="(.*?)"', r.text)[0]
 
-        temp = 'REPLACE INTO {} VALUES (?,?,?,?,?,?,?,?,?,?,?,?)'
-        url = '{}subject/{}/'.format(self.server, movie_id)
-        data = (movie_id, url, title, origin, year, rating, raters,
-                director, tags, regions, imdb, datetime.now())
-        self.conn.execute(temp.format(self.table_name), data)
+        _sql = 'REPLACE INTO {} VALUES (?,?,?,?,?,?,?,?,?,?,?,?)'
+        data = (movie_id, r.url, title, origin, year, rating, raters,
+                director, tags, regions, imdb, datetime.datetime.now())
+        self.conn.execute(_sql.format(self.db_table), data)
         self.conn.commit()
 
         return self.get_movie_info(movie_id=movie_id)
 
-    def get_top250(self):
+    def get_top250id(self):
         """
-        获取豆瓣电影top250列表
+        获取豆瓣top250电影id列表
         :return: 电影id列表
         """
-        top250 = []
         for i in range(5):
-            url = '{0}v2/movie/top250?start={1}&count={2}'
-            url = url.format(self.server.replace('movie', 'api'), i * 50, 50)
-            result = self.s.get(url)
-            top250.extend([x['id'] for x in result.json()['subjects']])
-
-            time.sleep(0.5)
-
-        return top250
+            url = 'v2/movie/top250?start={}&count=50'.format(i * 50)
+            r = self._request(parse.urljoin(self.host_api, url))
+            for movie_id in [x['id'] for x in r.json()['subjects']]:
+                yield movie_id
 
     def close(self):
         self.conn.close()

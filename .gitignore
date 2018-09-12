@@ -1,0 +1,5 @@
+.idea/
+venv/
+cookies/
+captcha.jpg
+db.sqlite3
