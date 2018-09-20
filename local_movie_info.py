@@ -194,6 +194,6 @@ if __name__ == '__main__':
     except Exception as e:
         import traceback
 
-        print(''.join([str(e), traceback.format_exc()]))
+        print('\n'.join([str(e), traceback.format_exc()]))
     finally:
         print(split_line)

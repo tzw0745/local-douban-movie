@@ -43,7 +43,7 @@ class DoubanMovie:
         :param pwd: 豆瓣密码
         :param cookies_dir: cookies文件夹
         """
-        if not all(isinstance(_, str)
+        if not all(_ and isinstance(_, str)
                    for _ in [db_file, username, pwd, cookies_dir]):
             raise TypeError('All params must be str')
 
