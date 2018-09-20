@@ -187,6 +187,7 @@ class DoubanMovie:
                 return self.get_movie_info(movie_id=info['id'])
 
             url = 'j/subject_suggest?q={}'.format(title)
+            url = parse.urljoin(self.host_movie, url)
             head = {'X-Requested-With': 'XMLHttpRequest'}
             for suggest in self._request(url, head=head).json():
                 if suggest['title'] == title:

@@ -1,53 +1,27 @@
 # coding:utf-8
-import os
+import configparser
 import copy
 import json
-import subprocess
-import configparser
-
+import os
 import re
+import subprocess
+from itertools import chain
+
 import xlsxwriter
 
 from douban_movie import DoubanMovie
 
 
-def get_all_file(dir_list):
+def all_files(d):
     """
-    递归获取父文件夹下的所有的文件
-    :param dir_list: 父文件夹列表
-    :return: 文件集合
+    获取目录目录下所有子文件
+    :param d: 目标目录
+    :return: 子文件列表
     """
-    work_dir_list = copy.copy(dir_list)
-    file_list = []
-    i = 0
-    # dir_list是递增的，所以不能用for in
-    while i < len(work_dir_list):
-        for x in os.listdir(work_dir_list[i]):
-            path = '{0}/{1}'.format(work_dir_list[i], x)
-            if os.path.isdir(path):
-                work_dir_list.append(path)
-            elif os.path.isfile(path):
-                file_list.append(path)
-        i += 1
-    return set(file_list)
+    return list(os.path.join(_d, _f) for _d, _, _fl in os.walk(d) for _f in _fl)
 
 
-def filter_file(file_list, ext_names):
-    """
-    通过扩展名过滤文件
-    :param file_list: 文件列表
-    :param ext_names: 要保留的文件扩展名列表
-    :return: 过滤后的文件列表
-    """
-    result = []
-    for ext in ext_names:
-        result.extend(
-            filter(lambda x: x.lower().endswith(ext.lower()), file_list)
-        )
-    return result
-
-
-def video_format(video_path):
+def parse_video(video_path):
     """
     调用ffprobo获取视频解码信息
     :param video_path: 视频文件路径
@@ -77,71 +51,65 @@ def video_format(video_path):
 
 
 def main():
-    ini_name, _ = os.path.splitext(os.path.basename(__file__))
     cfg = configparser.ConfigParser()
-    cfg.read('{}.ini'.format(ini_name))
+    cfg.read('config.ini', encoding='utf-8')
 
-    dir_list = cfg.get('main', 'path').split(';')
-    dir_list = [d for d in dir_list if d and os.path.exists(d)]
-    file_list = get_all_file(dir_list)
+    dirs = cfg.get('DEFAULT', 'path').split(';')
+    match = re.compile(cfg.get('DEFAULT', 'match'))
+    name_reg = re.compile(cfg.get('DEFAULT', 'name_reg'))
+    out_file = cfg.get('DEFAULT', 'out')
+    user = cfg.get('DEFAULT', 'username')
+    pwd = cfg.get('DEFAULT', 'password')
 
-    out_file = cfg.get('main', 'out')
-    user = cfg.get('main', 'username')
-    pwd = cfg.get('main', 'password')
-
-    ext_names = ['.mkv', '.rmvb', '.rm', '.wmv', '.avi', '.mpg', '.mpeg']
-    movie_list = filter_file(file_list, ext_names)
+    dirs = [_d for _d in dirs if os.path.isdir(_d)]
+    files = set(chain(*[all_files(_d) for _d in dirs]))
+    movies = set(filter(lambda _f: match.match(os.path.split(_f)[1]), files))
 
     local_movie = []
     top250 = []
-    with DoubanMovie('douban_movie.db', user, pwd) as db:
+    with DoubanMovie('db.sqlite3', user, pwd) as db:
         print('----开始统计本地电影信息----')
-        for movie_path in movie_list:
-            # 获取文件大小(G)
-            size = round(os.path.getsize(movie_path) / 1073741824, 1)
-            format_info = video_format(movie_path)
-
+        for movie_path in movies:
             # 获取电影名称
-            movie_name = movie_path.split('/')[-1]
-            movie_name = movie_name[:movie_name.rfind('.')]
-            if re.match(r'^[a-zA-Z0-9]+$', movie_name):
-                continue
-            movie_name = movie_name.split('.')[-1]
-            movie_name = re.split(r'[\[\(]+', movie_name)[0]
+            movie_name = name_reg.findall(os.path.split(movie_path)[1])[0]
             print(movie_name)
+            # 获取电影大小(G)
+            size = round(os.path.getsize(movie_path) / (1024 * 1024 * 1024), 1)
+            # 调用FFmpeg获取视频信息
+            video_info = parse_video(movie_path)
 
-            # 通过电影名称查找豆瓣信息
+            # 通过电影名称获取豆瓣电影信息
             movie_info = db.get_movie_info(title=movie_name)
             if not movie_info:
-                raise KeyError('未找到 "{0}" 的电影信息\n'.format(movie_name))
+                _msg = 'Movie "{0}" not found on Douban'
+                raise ValueError(_msg.format(movie_name))
 
-            local_movie.append({'size': size,
-                                'name': movie_name,
-                                'rating': movie_info['rating'],
-                                'director': movie_info['director'],
-                                'width': format_info['width'],
-                                'height': format_info['height'],
-                                'duration': format_info['duration'],
-                                'bit_rate': format_info['bit_rate'],
-                                'path': movie_path,
-                                'url': movie_info['url']})
+            local_movie.append({
+                'size': size, 'name': movie_name,
+                'rating': movie_info['rating'],
+                'director': movie_info['director'],
+                'width': video_info['width'],
+                'height': video_info['height'],
+                'duration': video_info['duration'],
+                'bit_rate': video_info['bit_rate'],
+                'path': movie_path, 'url': movie_info['url']
+            })
         local_movie.sort(key=lambda x: x['bit_rate'])
 
         print('----开始统计豆瓣电影Top250----')
-        for i, movie_id in enumerate(db.get_top250()):
-            info = db.get_movie_info(movie_id=movie_id)
-            if info:
-                top250.append({'rater_num': info['raters'],
-                               'rating': float(info['rating']),
-                               'director': info['director'],
-                               'year': int(info['year']),
-                               'title0': info['title'],
-                               'title1': info['origin'],
-                               'country': info['regions'],
-                               'url': info['url']})
-                print('Top{:0>3}'.format(i), info['title'])
-            else:
-                raise KeyError('Top{}({})查找失败!'.format(i, movie_id))
+        for i, movie_id in enumerate(db.get_top250id()):
+            movie_info = db.get_movie_info(movie_id=movie_id)
+            top250.append({
+                'rater_num': movie_info['raters'],
+                'rating': float(movie_info['rating']),
+                'director': movie_info['director'],
+                'year': int(movie_info['year']),
+                'title0': movie_info['title'],
+                'title1': movie_info['origin'],
+                'country': movie_info['regions'],
+                'url': movie_info['url']
+            })
+            print('Top{:0>3}'.format(i + 1), movie_info['title'])
 
     print('写入{}中...'.format(out_file))
     # 创建工作簿
@@ -173,14 +141,14 @@ def main():
     # 自动筛选
     worksheet.autofilter(0, 0, 0, len(head) - 1)
     # 写入数据
-    for i, info in enumerate(local_movie):
+    for i, movie_info in enumerate(local_movie):
         i += 1
-        worksheet.write(i, 0, info['size'], center)
-        worksheet.write_url(i, 1, info['url'], link_format, info['name'])
-        temp = [info['rating'], info['director'], info['width'],
-                info['height'], info['duration'], info['bit_rate']]
+        worksheet.write(i, 0, movie_info['size'], center)
+        worksheet.write_url(i, 1, movie_info['url'], link_format, movie_info['name'])
+        temp = [movie_info['rating'], movie_info['director'], movie_info['width'],
+                movie_info['height'], movie_info['duration'], movie_info['bit_rate']]
         worksheet.write_row(i, 2, temp, center)
-        worksheet.write_url(i, 8, info['path'], link_format, '播放')
+        worksheet.write_url(i, 8, movie_info['path'], link_format, '播放')
     # 首行冻结
     worksheet.freeze_panes(1, 0)
     # 条件格式
@@ -204,12 +172,12 @@ def main():
     # 自动筛选
     worksheet.autofilter(0, 0, 0, len(head) - 1)
     # 写入数据
-    for i, info in enumerate(top250):
+    for i, movie_info in enumerate(top250):
         i += 1
-        row = [info['rating'], info['rater_num'], info['year'], info['title0'],
-               info['title1'], info['director'], info['country']]
+        row = [movie_info['rating'], movie_info['rater_num'], movie_info['year'], movie_info['title0'],
+               movie_info['title1'], movie_info['director'], movie_info['country']]
         worksheet.write_row(i, 0, row, center)
-        worksheet.write_url(i, 7, info['url'], link_format, '链接')
+        worksheet.write_url(i, 7, movie_info['url'], link_format, '链接')
     # 首行冻结
     worksheet.freeze_panes(1, 0)
 
