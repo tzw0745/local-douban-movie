@@ -2,3 +2,4 @@ lxml
 cssselect
 requests
 xlsxwriter
+SQLAlchemy

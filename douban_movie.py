@@ -7,13 +7,16 @@ import json
 import math
 import os
 import re
-import sqlite3
 import time
-import datetime
+from datetime import datetime
 from urllib import parse
 
 import lxml.html
 import requests
+from sqlalchemy import Column, Integer, Float, String, DateTime
+from sqlalchemy.engine import create_engine
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
 
 
 class LoginError(Exception):
@@ -24,15 +27,35 @@ class DoubanMovie:
     """
     豆瓣电影类，获取并缓存来自豆瓣电影信息。获取方式为HTML解析，缓存方式为sqlite
     """
+    base = declarative_base()
+
+    class Table(base):
+        __tablename__ = 'DoubanMovie'
+
+        id = Column(Integer, primary_key=True)
+        url = Column(String, nullable=False)
+        title = Column(String, nullable=False)
+        origin = Column(String, nullable=True)
+        year = Column(Integer, nullable=False)
+        rating = Column(Float, nullable=False)
+        raters = Column(Integer, nullable=False)
+        director = Column(String, nullable=False)
+        tags = Column(String, nullable=False)
+        regions = Column(String, nullable=False)
+        iMDb = Column(String, nullable=False)
+        time = Column(DateTime, nullable=False)
+
+        def __repr__(self):
+            return '<DoubanMovie(id=\'{s.id}\', title=\'{s.title}\'>'.format(s=self)
+
     host_index = 'https://www.douban.com/'
     host_movie = 'https://movie.douban.com/'
     host_api = 'https://api.douban.com/'
     __session = None
     __last_request = 0
-    interval = 2  # HTTP请求最小间隔，单位为秒
+    interval = 4  # HTTP请求最小间隔，单位为秒
 
     db_conn = None
-    db_table = 'DoubanMovie'
     expires = 15 * 24 * 3600  # 缓存失效期，单位为秒
 
     def __init__(self, db_file: str, username: str, pwd: str, cookies_dir='cookies'):
@@ -49,20 +72,9 @@ class DoubanMovie:
 
         self.__session = requests.session()
         # 初始化数据库连接
-        _sql = ("CREATE TABLE {}"
-                "(id       INT  PRIMARY KEY,\n"
-                "url      TEXT NOT NULL,\n"
-                "title    TEXT NOT NULL,\n"
-                "origin   TEXT,\n"
-                "year     INT  NOT NULL,\n"
-                "rating   FLOAT NOT NULL,\n"
-                "raters   INT NOT NULL,\n"
-                "director TEXT NOT NULL,\n"
-                "tags     TEXT NOT NULL,\n"
-                "regions  TEXT NOT NULL,\n"
-                "iMDb     TEXT NOT NULL,\n"
-                "time     DATE NOT NULL)").format(self.db_table)
-        self.conn = connect_db(db_file, self.db_table, _sql)
+        engine = create_engine('sqlite:///' + db_file)
+        self.base.metadata.create_all(engine)
+        self.db_conn = sessionmaker(bind=engine)()
 
         # 载入本地cookies
         os.mkdir(cookies_dir) if not os.path.exists(cookies_dir) else None
@@ -87,14 +99,10 @@ class DoubanMovie:
             raise LoginError('IP has been blocked')
         captcha_info = self.__get_captcha(r.text)
         if captcha_info:
-            captcha_file = 'captcha.jpg'
             post_data['captcha-id'] = captcha_info['id']
-            with open(captcha_file, 'wb') as f:
-                f.write(self._request(captcha_info['url']).content)
-            os.system(captcha_file)
+            print(captcha_info['url'])
             print('please input captcha code: ', end='')
             post_data['captcha-solution'] = input()
-            os.remove(captcha_file)
 
         # 登陆并判断是否成功
         r = self._request(url, data=post_data)
@@ -105,6 +113,9 @@ class DoubanMovie:
             raise LoginError('登陆失败 {}'.format(error.text))
         if self.__get_captcha(r.text):
             raise LoginError('验证码错误')
+        title = tree.cssselect('head title')[0].text.strip()
+        if '豆瓣电影' not in title:
+            raise LoginError('未知错误 {}'.format(title))
 
         # 保存本地cookie
         with open(_cookies, 'w') as f:
@@ -125,7 +136,7 @@ class DoubanMovie:
         :param data: post数据，存在时发送POST请求
         :return: request.Response对象
         """
-        # print('[log]request to ', url)
+        print('[log]request to ', url)
         if time.time() - self.__last_request < self.interval:
             time.sleep(math.ceil(time.time() - self.__last_request))
         func = self.__session.post if data else self.__session.get
@@ -161,12 +172,12 @@ class DoubanMovie:
         :return: 无
         """
         url = parse.urljoin(self.host_index, 'settings')
-        r = self._request(url)
-        for title in re.findall(r'<title>(.*)</title>', r.text):
-            if '登录豆瓣' == title:
-                return False
+        tree = lxml.html.fromstring(self._request(url).text)
+        for title in tree.cssselect('head title'):
+            if '设置' in title.text:
+                return True
         else:
-            return True
+            return False
 
     def get_movie_info(self, movie_id=None, title=None):
         """
@@ -181,10 +192,10 @@ class DoubanMovie:
             raise TypeError('Param "movie" must be digit str')
 
         if title:
-            _sql = "SELECT * FROM {} WHERE title=?".format(self.db_table)
-            cursor = self.conn.execute(_sql, (title,))
-            for info in dict_gen(cursor):
-                return self.get_movie_info(movie_id=info['id'])
+            entity = self.db_conn.query(self.Table).filter(
+                self.Table.title == title).first()
+            if entity:
+                return entity
 
             url = 'j/subject_suggest?q={}'.format(title)
             url = parse.urljoin(self.host_movie, url)
@@ -194,48 +205,42 @@ class DoubanMovie:
                     _id = re.findall(r'subject/(\d+)/', suggest['url'])[0]
                     return self.get_movie_info(movie_id=_id)
             else:
-                return {}  # 未找到数据
+                return None  # 未找到数据
         elif movie_id:
-            _sql = 'SELECT * FROM {} WHERE id=?'.format(self.db_table)
-            cursor = self.conn.execute(_sql, (str(movie_id),))
-            for info in dict_gen(cursor):
-                stamp = datetime.datetime.strptime(info['time'], '%Y-%m-%d %X.%f')
-                if (datetime.datetime.now() - stamp).seconds >= self.expires:
-                    break
-                return info
+            entity = self.db_conn.query(self.Table).filter(
+                self.Table.id == movie_id).first()
+            if entity and (entity.time - datetime.now()).seconds <= self.expires:
+                return entity
 
         url = parse.urljoin('subject/', str(movie_id))
         r = self._request(parse.urljoin(self.host_movie, url))
         if r.status_code != 200:
-            return {}
+            return None
 
+        entity = self.Table(id=movie_id, url=r.url)
         tree = lxml.html.fromstring(r.content)
         _ = tree.cssselect('span[property=v\:itemreviewed]')[0]
         try:
-            title, origin = _.text.strip().split(maxsplit=1)
+            entity.title, entity.origin = _.text.strip().split(maxsplit=1)
         except ValueError:  # 中文电影只有一个标题
-            title, origin = _.text.strip(), ''
+            entity.title, entity.origin = _.text.strip(), ''
         _ = tree.cssselect('span.year')[0]
-        year = int(re.findall(r'\d{4}', _.text)[0])
+        entity.year = int(re.findall(r'\d{4}', _.text)[0])
         _ = tree.cssselect('strong[property=v\:average]')[0]
-        rating = float(_.text)
+        entity.rating = float(_.text)
         _ = tree.cssselect('span[property=v\:votes]')[0]
-        raters = int(_.text)
+        entity.raters = int(_.text)
         _ = tree.cssselect('a[rel=v\:directedBy]')[0]
-        director = _.text
+        entity.director = _.text
         _ = tree.cssselect('span[property=v\:genre]')
-        tags = '/'.join(x.text.strip() for x in _)
+        entity.tags = '/'.join(x.text.strip() for x in _)
         _ = re.findall(r'制片国家/地区:</span>(.*)<br/>', r.text)[0]
-        regions = '/'.join(str(x).strip() for x in _.split('/'))
-        imdb = re.findall(r'IMDb链接:</span> <a href="(.*?)"', r.text)[0]
+        entity.regions = '/'.join(str(x).strip() for x in _.split('/'))
+        entity.imdb = re.findall(r'IMDb链接:</span> <a href="(.*?)"', r.text)[0]
+        entity.time = datetime.now()
+        self.db_conn.merge(entity)
 
-        _sql = 'REPLACE INTO {} VALUES (?,?,?,?,?,?,?,?,?,?,?,?)'
-        data = (movie_id, r.url, title, origin, year, rating, raters,
-                director, tags, regions, imdb, datetime.datetime.now())
-        self.conn.execute(_sql.format(self.db_table), data)
-        self.conn.commit()
-
-        return self.get_movie_info(movie_id=movie_id)
+        return entity
 
     def get_top250id(self):
         """
@@ -249,32 +254,5 @@ class DoubanMovie:
                 yield movie_id
 
     def close(self):
-        self.conn.close()
-
-
-def connect_db(db_file, table_name, create_sql):
-    """
-    连接数据库
-    :param db_file: 数据库名称
-    :param table_name: 数据库表名
-    :param create_sql: 创建数据库语句
-    :return: 数据库连接
-    """
-    connect = sqlite3.connect(db_file)
-    query = '''SELECT count(*) FROM sqlite_master
-               WHERE type=? AND name=?'''
-    table_count = [x for x in connect.execute(
-        query, ('table', table_name))][0][0]
-    if table_count == 0:
-        connect.execute(create_sql)
-        connect.commit()
-    return connect
-
-
-def dict_gen(cur):
-    filed_names = [d[0] for d in cur.description]
-    while True:
-        row = cur.fetchone()
-        if not row:
-            return
-        yield dict(zip(filed_names, row))
+        self.db_conn.commit()
+        self.db_conn.close()

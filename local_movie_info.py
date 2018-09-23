@@ -1,6 +1,5 @@
 # coding:utf-8
 import configparser
-import copy
 import json
 import os
 import re
@@ -28,7 +27,7 @@ def parse_video(video_path):
     :return: 视频解码信息字典
     """
     args = ['ffprobe', '-v', 'quiet', '-print_format', 'json',
-            '-show_format', '-show_streams', '-i', video_path]
+            '-show_format', '-show_streams', '-i', "{}".format(video_path)]
     info = json.loads(subprocess.check_output(args).decode('utf-8'))
 
     for stream in info['streams']:
@@ -61,6 +60,8 @@ def main():
     user = cfg.get('DEFAULT', 'username')
     pwd = cfg.get('DEFAULT', 'password')
 
+    out_file = os.path.expanduser(out_file)
+    dirs = [os.path.expanduser(_d) for _d in dirs]
     dirs = [_d for _d in dirs if os.path.isdir(_d)]
     files = set(chain(*[all_files(_d) for _d in dirs]))
     movies = set(filter(lambda _f: match.match(os.path.split(_f)[1]), files))
@@ -86,30 +87,24 @@ def main():
 
             local_movie.append({
                 'size': size, 'name': movie_name,
-                'rating': movie_info['rating'],
-                'director': movie_info['director'],
+                'rating': movie_info.rating,
+                'director': movie_info.director,
                 'width': video_info['width'],
                 'height': video_info['height'],
                 'duration': video_info['duration'],
                 'bit_rate': video_info['bit_rate'],
-                'path': movie_path, 'url': movie_info['url']
+                'path': movie_path, 'url': movie_info.url
             })
         local_movie.sort(key=lambda x: x['bit_rate'])
 
         print('----开始统计豆瓣电影Top250----')
         for i, movie_id in enumerate(db.get_top250id()):
             movie_info = db.get_movie_info(movie_id=movie_id)
-            top250.append({
-                'rater_num': movie_info['raters'],
-                'rating': float(movie_info['rating']),
-                'director': movie_info['director'],
-                'year': int(movie_info['year']),
-                'title0': movie_info['title'],
-                'title1': movie_info['origin'],
-                'country': movie_info['regions'],
-                'url': movie_info['url']
-            })
-            print('Top{:0>3}'.format(i + 1), movie_info['title'])
+            if not movie_info:
+                _msg = 'Movie ID "{0}" not found on Douban'
+                raise ValueError(_msg.format(movie_id))
+            top250.append(dict(movie_info.__dict__))
+            print('Top{:0>3}'.format(i + 1), movie_info.title)
 
     print('写入{}中...'.format(out_file))
     # 创建工作簿
@@ -174,8 +169,8 @@ def main():
     # 写入数据
     for i, movie_info in enumerate(top250):
         i += 1
-        row = [movie_info['rating'], movie_info['rater_num'], movie_info['year'], movie_info['title0'],
-               movie_info['title1'], movie_info['director'], movie_info['country']]
+        row = [movie_info['rating'], movie_info['raters'], movie_info['year'], movie_info['title'],
+               movie_info['origin'], movie_info['director'], movie_info['regions']]
         worksheet.write_row(i, 0, row, center)
         worksheet.write_url(i, 7, movie_info['url'], link_format, '链接')
     # 首行冻结
